@@ -26,6 +26,9 @@ tsconfig.tsbuildinfo
 **/playwright-report/
 **/blob-report/
 **/playwright/.cache/
+coverage/
+__pycache__/
+*.pyc
 dev-dist
 
 .direnv

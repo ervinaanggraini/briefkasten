@@ -10,6 +10,7 @@
     "build:bun": "bun clean && tsc",
     "build": "pnpm clean && tsc",
     "test": "node --import tsx --test test/*.test.mjs",
+    "test:coverage": "mkdir -p ../../coverage && node --import tsx --test --experimental-test-coverage --test-reporter=spec --test-reporter-destination=stdout --test-reporter=lcov --test-reporter-destination=../../coverage/lcov.info test/*.test.mjs",
     "clean": "rm -rf dist",
     "start:bun": "bun --bun dist/index.js",
     "start": "node --env-file=.env dist/index.js",
