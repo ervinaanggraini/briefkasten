@@ -4,6 +4,7 @@ import { db } from "$lib/prisma"
 import type { Actions, PageServerLoad } from "./$types"
 import type { Tag } from "$/prisma-client/client"
 
+//tes
 export const actions: Actions = {
   deleteBookmark: async (event) => {
     const userId = getUserId(event.locals)
