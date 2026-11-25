@@ -8,6 +8,7 @@ import { page } from "$app/state"
 import { BookmarkRow } from "$lib/components/bookmark-row"
 import EmptyState from "$lib/components/EmptyState.svelte"
 import KeyboardIndicator from "$lib/components/KeyboardIndicator.svelte"
+import LoadingIndicator from "$lib/components/LoadingIndicator.svelte"
 import { Navbar } from "$lib/components/navbar"
 import { BookmarkSearchService } from "$lib/state/bookmarkSearch.svelte"
 import { BookmarksService } from "$lib/state/bookmarks.svelte"
@@ -196,6 +197,12 @@ const clearSearch = () => {
       {#each bookmarkService.bookmarks as item (item.id)}
         <BookmarkRow bookmark={item} onArchived={(bookmarkId) => bookmarkService.remove(bookmarkId)} />
       {/each}
+      {#snippet loading()}
+        <div class="flex items-center gap-2 py-2 text-sm text-muted-foreground">
+          <LoadingIndicator size="sm" />
+          <span>Loading...</span>
+        </div>
+      {/snippet}
       {#snippet noData()}
         {#if bookmarkService.bookmarks.length >= 10}
           <div class="text-2xl">No more data</div>

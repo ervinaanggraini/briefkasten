@@ -1,7 +1,9 @@
 import { betterAuth } from "better-auth"
 import { prismaAdapter } from "better-auth/adapters/prisma"
+import { APIError, createAuthMiddleware } from "better-auth/api"
 import { username } from "better-auth/plugins"
 import { sveltekitCookies } from "better-auth/svelte-kit"
+import { z } from "zod"
 import { getRequestEvent } from "$app/server"
 import { env } from "$env/dynamic/private"
 import { db } from "$lib/prisma"
@@ -17,6 +19,24 @@ export const auth = betterAuth({
   plugins: [username(), sveltekitCookies(getRequestEvent)],
   emailAndPassword: {
     enabled: true,
+  },
+  hooks: {
+    before: createAuthMiddleware(async (ctx) => {
+      if (ctx.path !== "/sign-in/email") {
+        return
+      }
+      const email = typeof ctx.body?.email === "string" ? ctx.body.email.trim().toLowerCase() : ""
+      if (!email || !z.email().safeParse(email).success) {
+        return
+      }
+      const existingUser = await ctx.context.internalAdapter.findUserByEmail(email)
+      if (!existingUser) {
+        throw new APIError("BAD_REQUEST", {
+          code: "USER_NOT_FOUND",
+          message: "No account found with this email. Please sign up first.",
+        })
+      }
+    }),
   },
   advanced: {
     // Secure cookies when served over https (the public scheme behind the

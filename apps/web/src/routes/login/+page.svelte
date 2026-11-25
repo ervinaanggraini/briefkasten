@@ -1,49 +1,264 @@
 <script lang="ts">
-  import { tick } from "svelte";
-  import { toast } from "svelte-sonner";
-  import { twJoin } from "tailwind-merge";
-  import { browser } from "$app/environment";
-  import { goto } from "$app/navigation";
-  import { page } from "$app/state";
-  import LoginPattern from "$lib/assets/LoginPattern.svelte";
-  import { authClient } from "$lib/auth-client";
-  import ProviderIcons from "./ProviderIcons.svelte";
+import { tick } from "svelte"
+import { toast } from "svelte-sonner"
+import { twJoin } from "tailwind-merge"
+import { browser } from "$app/environment"
+import { goto } from "$app/navigation"
+import { page } from "$app/state"
+import LoginPattern from "$lib/assets/LoginPattern.svelte"
+import { authClient } from "$lib/auth-client"
+import LoadingIndicator from "$lib/components/LoadingIndicator.svelte"
+import { loading } from "$lib/state/loading"
+import ProviderIcons from "./ProviderIcons.svelte"
 
-  const session = authClient.useSession();
+type AuthFeedback = {
+  kind: "warning" | "error"
+  message: string
+  action?: "signup" | "signin"
+}
 
-  let email = $state("");
-  let password = $state("");
-  let name = $state("");
-  let isSignUp = $state(false);
+const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 
-  const providerButtonStyles = (provider: string): string => {
-    switch (provider) {
-      case "github":
-        return "bg-neutral-700 text-white";
-      case "google":
-        return "bg-white focus:ring-blue-700 text-blue-600 border border-gray-300";
-      case "azure-ad":
-        return "bg-blue-700 hover:bg-blue-900 focus:ring-blue-700 text-white";
-      case "authentik":
-        return "bg-orange-600 hover:bg-orange-800 text-white";
-      case "keycloak":
-        return "bg-gray-600 hover:bg-gray-800 text-white";
-      default:
-        return "bg-gray-600 hover:bg-gray-800 text-white";
-    }
-  };
+const session = authClient.useSession()
 
-  if (browser && page.url.searchParams.get("verifyEmail")) {
-    void tick().then(() => {
-      toast.success("Email sent, please check your inbox!", {
-        position: "top-left",
-        classes: {
-          toast: "bg-neutral-700/20 text-white border-gray-400/10",
-        },
-      });
-      // void goto("#");
-    });
+let email = $state("")
+let password = $state("")
+let name = $state("")
+let isSignUp = $state(false)
+let isSubmitting = $state(false)
+let socialProviderLoading = $state<"github" | "google" | null>(null)
+let isSigningOut = $state(false)
+let signInFeedback = $state<AuthFeedback | null>(null)
+let signUpFeedback = $state<AuthFeedback | null>(null)
+
+const isBusy = $derived(isSubmitting || socialProviderLoading !== null || isSigningOut)
+
+const providerButtonStyles = (provider: string): string => {
+  switch (provider) {
+    case "github":
+      return "bg-neutral-700 text-white"
+    case "google":
+      return "bg-white focus:ring-blue-700 text-blue-600 border border-gray-300"
+    case "azure-ad":
+      return "bg-blue-700 hover:bg-blue-900 focus:ring-blue-700 text-white"
+    case "authentik":
+      return "bg-orange-600 hover:bg-orange-800 text-white"
+    case "keycloak":
+      return "bg-gray-600 hover:bg-gray-800 text-white"
+    default:
+      return "bg-gray-600 hover:bg-gray-800 text-white"
   }
+}
+
+const switchMode = (signUp: boolean) => {
+  isSignUp = signUp
+  signInFeedback = null
+  signUpFeedback = null
+}
+
+const handleSignIn = async (event: SubmitEvent) => {
+  event.preventDefault()
+  if (isBusy) return
+
+  const trimmedEmail = email.trim()
+  if (!trimmedEmail || !password) {
+    signInFeedback = {
+      kind: "warning",
+      message: "Please enter both your email and password.",
+    }
+    return
+  }
+
+  if (!EMAIL_PATTERN.test(trimmedEmail)) {
+    signInFeedback = {
+      kind: "error",
+      message: "Please enter a valid email address.",
+    }
+    return
+  }
+
+  signInFeedback = null
+  isSubmitting = true
+  loading.setLoading(true, "Signing in...")
+
+  try {
+    const result = await authClient.signIn.email({
+      email: trimmedEmail,
+      password,
+    })
+
+    if (result.error) {
+      const code = result.error.code
+      if (code === "USER_NOT_FOUND") {
+        signInFeedback = {
+          kind: "warning",
+          message: "No account found with this email. Please sign up first.",
+          action: "signup",
+        }
+      } else if (code === "INVALID_EMAIL_OR_PASSWORD") {
+        signInFeedback = {
+          kind: "error",
+          message: "Incorrect email or password. Please try again.",
+        }
+      } else if (code === "INVALID_EMAIL") {
+        signInFeedback = {
+          kind: "error",
+          message: "Please enter a valid email address.",
+        }
+      } else {
+        signInFeedback = {
+          kind: "error",
+          message: result.error.message || "Unable to sign in. Please try again.",
+        }
+      }
+      return
+    }
+
+    await goto(page.data.redirectTo ?? "/")
+  } catch {
+    signInFeedback = {
+      kind: "error",
+      message: "Something went wrong while signing in. Please try again.",
+    }
+  } finally {
+    isSubmitting = false
+    loading.setLoading(false)
+  }
+}
+
+const handleSignUp = async (event: SubmitEvent) => {
+  event.preventDefault()
+  if (isBusy) return
+
+  const trimmedName = name.trim()
+  const trimmedEmail = email.trim()
+
+  if (!trimmedName || !trimmedEmail || !password) {
+    signUpFeedback = {
+      kind: "warning",
+      message: "Please fill in your name, email, and password.",
+    }
+    return
+  }
+
+  if (!EMAIL_PATTERN.test(trimmedEmail)) {
+    signUpFeedback = {
+      kind: "error",
+      message: "Please enter a valid email address.",
+    }
+    return
+  }
+
+  if (password.length < 8) {
+    signUpFeedback = {
+      kind: "warning",
+      message: "Password must be at least 8 characters long.",
+    }
+    return
+  }
+
+  signUpFeedback = null
+  isSubmitting = true
+  loading.setLoading(true, "Creating account...")
+
+  try {
+    const result = await authClient.signUp.email({
+      name: trimmedName,
+      email: trimmedEmail,
+      password,
+    })
+
+    if (result.error) {
+      const code = result.error.code
+      if (code === "USER_ALREADY_EXISTS" || code === "USER_ALREADY_EXISTS_USE_ANOTHER_EMAIL") {
+        signUpFeedback = {
+          kind: "warning",
+          message: "An account with this email already exists. Please sign in instead.",
+          action: "signin",
+        }
+      } else if (code === "PASSWORD_TOO_SHORT") {
+        signUpFeedback = {
+          kind: "warning",
+          message: "Password is too short. Please use at least 8 characters.",
+        }
+      } else if (code === "INVALID_EMAIL") {
+        signUpFeedback = {
+          kind: "error",
+          message: "Please enter a valid email address.",
+        }
+      } else {
+        signUpFeedback = {
+          kind: "error",
+          message: result.error.message || "Unable to create account. Please try again.",
+        }
+      }
+      return
+    }
+
+    await goto(page.data.redirectTo ?? "/")
+  } catch {
+    signUpFeedback = {
+      kind: "error",
+      message: "Something went wrong while creating your account. Please try again.",
+    }
+  } finally {
+    isSubmitting = false
+    loading.setLoading(false)
+  }
+}
+
+const handleSocialSignIn = async (provider: "github" | "google") => {
+  if (isBusy) return
+  signInFeedback = null
+  socialProviderLoading = provider
+  loading.setLoading(true, `Connecting to ${provider === "github" ? "GitHub" : "Google"}...`)
+
+  try {
+    const result = await authClient.signIn.social({
+      provider,
+      callbackURL: page.data.redirectTo ?? "/",
+    })
+
+    if (result?.error) {
+      signInFeedback = {
+        kind: "error",
+        message: result.error.message || `Unable to sign in with ${provider}.`,
+      }
+      socialProviderLoading = null
+      loading.setLoading(false)
+    }
+  } catch {
+    signInFeedback = {
+      kind: "error",
+      message: `Unable to sign in with ${provider}. Please try again.`,
+    }
+    socialProviderLoading = null
+    loading.setLoading(false)
+  }
+}
+
+const handleSignOut = async () => {
+  if (isBusy) return
+  isSigningOut = true
+  loading.setLoading(true, "Signing out...")
+  try {
+    await authClient.signOut({})
+  } finally {
+    isSigningOut = false
+    loading.setLoading(false)
+  }
+}
+
+if (browser && page.url.searchParams.get("verifyEmail")) {
+  void tick().then(() => {
+    toast.success("Email sent, please check your inbox!", {
+      position: "top-left",
+      classes: {
+        toast: "bg-neutral-700/20 text-white border-gray-400/10",
+      },
+    })
+  })
+}
 </script>
 
 <div class="flex overflow-hidden relative w-full h-full">
@@ -89,44 +304,88 @@
             class="flip-card-front flex flex-col gap-2 p-6 w-full bg-white rounded shadow-lg"
           >
             {#if !$session.data}
-              <div
+              <form
+                novalidate
+                onsubmit={handleSignIn}
                 class="flex flex-col justify-center items-stretch space-y-2 w-full focus:outline-none [&>button]:transition focus:[&>button]:outline-none focus:[&>button]:ring-2 focus:[&>button]:ring-offset-2 focus:[&>button]:ring-zinc-300 [&>button]:rounded-sm"
               >
                 <input
                   id="email"
                   type="email"
                   name="email"
+                  autocomplete="email"
                   bind:value={email}
+                  oninput={() => (signInFeedback = null)}
+                  disabled={isBusy}
                   placeholder="user@company.com"
-                  class="flex py-2 px-3 w-full text-sm bg-transparent rounded-sm border ring-offset-white transition focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:outline-none border-neutral-300 placeholder:text-neutral-400 text-neutral-900 focus-visible:ring-zinc-300"
+                  class="flex py-2 px-3 w-full text-sm bg-transparent rounded-sm border ring-offset-white transition focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:outline-none border-neutral-300 placeholder:text-neutral-400 text-neutral-900 focus-visible:ring-zinc-300 disabled:opacity-50"
                   required
                 />
                 <input
                   id="password"
                   type="password"
                   name="password"
+                  autocomplete="current-password"
                   bind:value={password}
-                  placeholder=""
-                  class="flex py-2 px-3 w-full text-sm bg-transparent rounded-sm border ring-offset-white transition focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:outline-none border-neutral-300 placeholder:text-neutral-400 text-neutral-900 focus-visible:ring-zinc-300"
+                  oninput={() => (signInFeedback = null)}
+                  disabled={isBusy}
+                  placeholder="Password"
+                  class="flex py-2 px-3 w-full text-sm bg-transparent rounded-sm border ring-offset-white transition focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:outline-none border-neutral-300 placeholder:text-neutral-400 text-neutral-900 focus-visible:ring-zinc-300 disabled:opacity-50"
                   required
                 />
+                {#if signInFeedback}
+                  <div
+                    role="alert"
+                    class={twJoin(
+                      "flex items-start gap-2 rounded-sm border px-3 py-2 text-xs leading-relaxed",
+                      signInFeedback.kind === "warning"
+                        ? "border-amber-300 bg-amber-50 text-amber-900"
+                        : "border-red-300 bg-red-50 text-red-800",
+                    )}
+                  >
+                    <svg
+                      class="mt-0.5 size-4 shrink-0"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-width="2"
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                      aria-hidden="true"
+                    >
+                      <path
+                        d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"
+                      />
+                      <path d="M12 9v4" />
+                      <path d="M12 17h.01" />
+                    </svg>
+                    <div class="flex flex-col gap-1">
+                      <span>{signInFeedback.message}</span>
+                      {#if signInFeedback.action === "signup"}
+                        <button
+                          type="button"
+                          class="self-start font-semibold underline underline-offset-2 hover:opacity-80"
+                          onclick={() => switchMode(true)}
+                        >
+                          Sign up now
+                        </button>
+                      {/if}
+                    </div>
+                  </div>
+                {/if}
                 <button
-                  class="flex overflow-hidden justify-center items-center px-4 space-x-2 w-full h-10 text-sm font-light text-white rounded-sm transition focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 bg-neutral-700 ring-offset-background focus-visible:ring-zinc-300 hover:cursor-pointer"
-                  onclick={async () => {
-                    await authClient.signIn.email(
-                      {
-                        email,
-                        password,
-                      },
-                      {
-                        onSuccess: () => goto(page.data.redirectTo ?? "/"),
-                      },
-                    );
-                  }}
+                  type="submit"
+                  disabled={isBusy}
+                  class="flex overflow-hidden justify-center items-center px-4 space-x-2 w-full h-10 text-sm font-light text-white rounded-sm transition focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 bg-neutral-700 hover:bg-neutral-800 ring-offset-background focus-visible:ring-zinc-300 disabled:opacity-60 disabled:cursor-not-allowed"
                 >
-                  Continue
+                  {#if isSubmitting}
+                    <LoadingIndicator size="sm" />
+                    <span>Signing in...</span>
+                  {:else}
+                    <span>Continue</span>
+                  {/if}
                 </button>
-              </div>
+              </form>
 
               <div class="flex gap-2 items-center my-2">
                 <div class="flex-1 bg-neutral-300 h-px"></div>
@@ -136,101 +395,109 @@
                 <div class="flex-1 bg-neutral-300 h-px"></div>
               </div>
               <button
-                onclick={async () => {
-                  await authClient.signIn.social({
-                    provider: "github",
-                    callbackURL: page.data.redirectTo ?? "/",
-                  });
-                }}
-                class="w-full *:w-full [&>button]:transition focus:[&>button]:outline-none focus:[&>button]:ring-2 focus:[&>button]:ring-offset-2 focus:[&>button]:ring-zinc-300 [&>button]:rounded-sm"
+                type="button"
+                disabled={isBusy}
+                onclick={() => handleSocialSignIn("github")}
+                class="w-full *:w-full disabled:opacity-60 disabled:cursor-not-allowed [&>button]:transition focus:[&>button]:outline-none focus:[&>button]:ring-2 focus:[&>button]:ring-offset-2 focus:[&>button]:ring-zinc-300 [&>button]:rounded-sm"
               >
                 <div
                   class={twJoin(
-                    "flex h-10 w-full items-center space-x-2 rounded px-4 text-base font-light transition focus:outline-none focus:ring-2 focus:ring-offset-2 group overflow-hidden focus-visible:ring-zinc-300 hover:cursor-pointer",
+                    "flex h-10 w-full items-center space-x-2 rounded px-4 text-base font-light transition focus:outline-none focus:ring-2 focus:ring-offset-2 group overflow-hidden focus-visible:ring-zinc-300",
                     providerButtonStyles("github"),
                   )}
                 >
-                  <div
-                    class="inline-flex relative items-center w-full transition -translate-x-0 group-hover:-translate-x-6 group-focus-visible:-translate-x-6"
-                  >
-                    <div
-                      class="absolute opacity-100 transition translate-x-0 group-hover:opacity-0 group-hover:-translate-x-6 group-focus-visible:-translate-x-6"
-                    >
-                      <ProviderIcons provider="github" />
+                  {#if socialProviderLoading === "github"}
+                    <div class="flex w-full items-center justify-center gap-2 text-sm">
+                      <LoadingIndicator size="sm" />
+                      <span>Redirecting...</span>
                     </div>
-                    <span class="flex justify-center w-full text-sm">
-                      Continue with GitHub
-                    </span>
+                  {:else}
                     <div
-                      class="absolute right-0 opacity-0 transition translate-x-12 group-hover:opacity-100 group-hover:translate-x-6 group-focus-visible:translate-x-6"
+                      class="inline-flex relative items-center w-full transition -translate-x-0 group-hover:-translate-x-6 group-focus-visible:-translate-x-6"
                     >
-                      <svg
-                        width="15"
-                        height="15"
-                        viewBox="0 0 15 15"
-                        fill="none"
-                        xmlns="http://www.w3.org/2000/svg"
-                        class="w-5 h-5"
+                      <div
+                        class="absolute opacity-100 transition translate-x-0 group-hover:opacity-0 group-hover:-translate-x-6 group-focus-visible:-translate-x-6"
                       >
-                        <path
-                          d="M8.14645 3.14645C8.34171 2.95118 8.65829 2.95118 8.85355 3.14645L12.8536 7.14645C13.0488 7.34171 13.0488 7.65829 12.8536 7.85355L8.85355 11.8536C8.65829 12.0488 8.34171 12.0488 8.14645 11.8536C7.95118 11.6583 7.95118 11.3417 8.14645 11.1464L11.2929 8H2.5C2.22386 8 2 7.77614 2 7.5C2 7.22386 2.22386 7 2.5 7H11.2929L8.14645 3.85355C7.95118 3.65829 7.95118 3.34171 8.14645 3.14645Z"
-                          fill="currentColor"
-                          fill-rule="evenodd"
-                          clip-rule="evenodd"
+                        <ProviderIcons provider="github" />
+                      </div>
+                      <span class="flex justify-center w-full text-sm">
+                        Continue with GitHub
+                      </span>
+                      <div
+                        class="absolute right-0 opacity-0 transition translate-x-12 group-hover:opacity-100 group-hover:translate-x-6 group-focus-visible:translate-x-6"
+                      >
+                        <svg
+                          width="15"
+                          height="15"
+                          viewBox="0 0 15 15"
+                          fill="none"
+                          xmlns="http://www.w3.org/2000/svg"
+                          class="w-5 h-5"
                         >
-                        </path>
-                      </svg>
+                          <path
+                            d="M8.14645 3.14645C8.34171 2.95118 8.65829 2.95118 8.85355 3.14645L12.8536 7.14645C13.0488 7.34171 13.0488 7.65829 12.8536 7.85355L8.85355 11.8536C8.65829 12.0488 8.34171 12.0488 8.14645 11.8536C7.95118 11.6583 7.95118 11.3417 8.14645 11.1464L11.2929 8H2.5C2.22386 8 2 7.77614 2 7.5C2 7.22386 2.22386 7 2.5 7H11.2929L8.14645 3.85355C7.95118 3.65829 7.95118 3.34171 8.14645 3.14645Z"
+                            fill="currentColor"
+                            fill-rule="evenodd"
+                            clip-rule="evenodd"
+                          >
+                          </path>
+                        </svg>
+                      </div>
                     </div>
-                  </div>
+                  {/if}
                 </div>
               </button>
               <button
-                onclick={async () => {
-                  await authClient.signIn.social({
-                    provider: "google",
-                    callbackURL: page.data.redirectTo ?? "/",
-                  });
-                }}
-                class="w-full *:w-full [&>button]:transition focus:[&>button]:outline-none focus:[&>button]:ring-2 focus:[&>button]:ring-offset-2 focus:[&>button]:ring-zinc-300 [&>button]:rounded-sm"
+                type="button"
+                disabled={isBusy}
+                onclick={() => handleSocialSignIn("google")}
+                class="w-full *:w-full disabled:opacity-60 disabled:cursor-not-allowed [&>button]:transition focus:[&>button]:outline-none focus:[&>button]:ring-2 focus:[&>button]:ring-offset-2 focus:[&>button]:ring-zinc-300 [&>button]:rounded-sm"
               >
                 <div
                   class={twJoin(
-                    "flex h-10 w-full items-center space-x-2 rounded px-4 text-base font-light transition focus:outline-none focus:ring-2 focus:ring-offset-2 group overflow-hidden focus-visible:ring-zinc-300 hover:cursor-pointer",
+                    "flex h-10 w-full items-center space-x-2 rounded px-4 text-base font-light transition focus:outline-none focus:ring-2 focus:ring-offset-2 group overflow-hidden focus-visible:ring-zinc-300",
                     providerButtonStyles("google"),
                   )}
                 >
-                  <div
-                    class="inline-flex relative items-center w-full transition -translate-x-0 group-hover:-translate-x-6 group-focus-visible:-translate-x-6"
-                  >
-                    <div
-                      class="absolute opacity-100 transition translate-x-0 group-hover:opacity-0 group-hover:-translate-x-6 group-focus-visible:-translate-x-6"
-                    >
-                      <ProviderIcons provider="google" />
+                  {#if socialProviderLoading === "google"}
+                    <div class="flex w-full items-center justify-center gap-2 text-sm">
+                      <LoadingIndicator size="sm" />
+                      <span>Redirecting...</span>
                     </div>
-                    <span class="flex justify-center w-full text-sm">
-                      Continue with Google
-                    </span>
+                  {:else}
                     <div
-                      class="absolute right-0 opacity-0 transition translate-x-12 group-hover:opacity-100 group-hover:translate-x-6 group-focus-visible:translate-x-6"
+                      class="inline-flex relative items-center w-full transition -translate-x-0 group-hover:-translate-x-6 group-focus-visible:-translate-x-6"
                     >
-                      <svg
-                        width="15"
-                        height="15"
-                        viewBox="0 0 15 15"
-                        fill="none"
-                        xmlns="http://www.w3.org/2000/svg"
-                        class="w-5 h-5"
+                      <div
+                        class="absolute opacity-100 transition translate-x-0 group-hover:opacity-0 group-hover:-translate-x-6 group-focus-visible:-translate-x-6"
                       >
-                        <path
-                          d="M8.14645 3.14645C8.34171 2.95118 8.65829 2.95118 8.85355 3.14645L12.8536 7.14645C13.0488 7.34171 13.0488 7.65829 12.8536 7.85355L8.85355 11.8536C8.65829 12.0488 8.34171 12.0488 8.14645 11.8536C7.95118 11.6583 7.95118 11.3417 8.14645 11.1464L11.2929 8H2.5C2.22386 8 2 7.77614 2 7.5C2 7.22386 2.22386 7 2.5 7H11.2929L8.14645 3.85355C7.95118 3.65829 7.95118 3.34171 8.14645 3.14645Z"
-                          fill="currentColor"
-                          fill-rule="evenodd"
-                          clip-rule="evenodd"
+                        <ProviderIcons provider="google" />
+                      </div>
+                      <span class="flex justify-center w-full text-sm">
+                        Continue with Google
+                      </span>
+                      <div
+                        class="absolute right-0 opacity-0 transition translate-x-12 group-hover:opacity-100 group-hover:translate-x-6 group-focus-visible:translate-x-6"
+                      >
+                        <svg
+                          width="15"
+                          height="15"
+                          viewBox="0 0 15 15"
+                          fill="none"
+                          xmlns="http://www.w3.org/2000/svg"
+                          class="w-5 h-5"
                         >
-                        </path>
-                      </svg>
+                          <path
+                            d="M8.14645 3.14645C8.34171 2.95118 8.65829 2.95118 8.85355 3.14645L12.8536 7.14645C13.0488 7.34171 13.0488 7.65829 12.8536 7.85355L8.85355 11.8536C8.65829 12.0488 8.34171 12.0488 8.14645 11.8536C7.95118 11.6583 7.95118 11.3417 8.14645 11.1464L11.2929 8H2.5C2.22386 8 2 7.77614 2 7.5C2 7.22386 2.22386 7 2.5 7H11.2929L8.14645 3.85355C7.95118 3.65829 7.95118 3.34171 8.14645 3.14645Z"
+                            fill="currentColor"
+                            fill-rule="evenodd"
+                            clip-rule="evenodd"
+                          >
+                          </path>
+                        </svg>
+                      </div>
                     </div>
-                  </div>
+                  {/if}
                 </div>
               </button>
 
@@ -239,20 +506,26 @@
                 <span class="text-neutral-600">Don't have an account?</span>
                 <button
                   type="button"
-                  class="ml-2 text-neutral-900 font-medium hover:underline"
-                  onclick={() => (isSignUp = true)}
+                  disabled={isBusy}
+                  class="ml-2 text-neutral-900 font-medium hover:underline disabled:opacity-50"
+                  onclick={() => switchMode(true)}
                 >
                   Sign up
                 </button>
               </div>
             {:else}
               <button
-                class="flex overflow-hidden justify-center items-center px-4 space-x-2 w-full h-10 text-sm font-light text-white rounded-sm transition focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 bg-neutral-700 ring-offset-background focus-visible:ring-zinc-300 hover:cursor-pointer"
-                onclick={async () => {
-                  await authClient.signOut({});
-                }}
+                type="button"
+                disabled={isBusy}
+                class="flex overflow-hidden justify-center items-center px-4 space-x-2 w-full h-10 text-sm font-light text-white rounded-sm transition focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 bg-neutral-700 ring-offset-background focus-visible:ring-zinc-300 disabled:opacity-60 disabled:cursor-not-allowed"
+                onclick={handleSignOut}
               >
-                Sign out
+                {#if isSigningOut}
+                  <LoadingIndicator size="sm" />
+                  <span>Signing out...</span>
+                {:else}
+                  <span>Sign out</span>
+                {/if}
               </button>
             {/if}
           </div>
@@ -265,62 +538,109 @@
               <h3 class="text-xl font-medium text-neutral-900 mb-2">
                 Create Account
               </h3>
-              <div
+              <form
+                novalidate
+                onsubmit={handleSignUp}
                 class="flex flex-col justify-center items-stretch space-y-2 w-full focus:outline-none"
               >
                 <input
                   id="signup-name"
                   type="text"
                   name="name"
+                  autocomplete="name"
                   bind:value={name}
+                  oninput={() => (signUpFeedback = null)}
+                  disabled={isBusy}
                   placeholder="John Doe"
-                  class="flex py-2 px-3 w-full text-sm bg-transparent rounded-sm border ring-offset-white transition focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:outline-none border-neutral-300 placeholder:text-neutral-400 text-neutral-900 focus-visible:ring-zinc-300"
+                  class="flex py-2 px-3 w-full text-sm bg-transparent rounded-sm border ring-offset-white transition focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:outline-none border-neutral-300 placeholder:text-neutral-400 text-neutral-900 focus-visible:ring-zinc-300 disabled:opacity-50"
                   required
                 />
                 <input
                   id="signup-email"
                   type="email"
                   name="email"
+                  autocomplete="email"
                   bind:value={email}
+                  oninput={() => (signUpFeedback = null)}
+                  disabled={isBusy}
                   placeholder="user@company.com"
-                  class="flex py-2 px-3 w-full text-sm bg-transparent rounded-sm border ring-offset-white transition focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:outline-none border-neutral-300 placeholder:text-neutral-400 text-neutral-900 focus-visible:ring-zinc-300"
+                  class="flex py-2 px-3 w-full text-sm bg-transparent rounded-sm border ring-offset-white transition focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:outline-none border-neutral-300 placeholder:text-neutral-400 text-neutral-900 focus-visible:ring-zinc-300 disabled:opacity-50"
                   required
                 />
                 <input
                   id="signup-password"
                   type="password"
                   name="password"
+                  autocomplete="new-password"
                   bind:value={password}
-                  placeholder="p4assw0rd"
-                  class="flex py-2 px-3 w-full text-sm bg-transparent rounded-sm border ring-offset-white transition focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:outline-none border-neutral-300 placeholder:text-neutral-400 text-neutral-900 focus-visible:ring-zinc-300"
+                  oninput={() => (signUpFeedback = null)}
+                  disabled={isBusy}
+                  placeholder="Password (min. 8 characters)"
+                  class="flex py-2 px-3 w-full text-sm bg-transparent rounded-sm border ring-offset-white transition focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:outline-none border-neutral-300 placeholder:text-neutral-400 text-neutral-900 focus-visible:ring-zinc-300 disabled:opacity-50"
                   required
                 />
+                {#if signUpFeedback}
+                  <div
+                    role="alert"
+                    class={twJoin(
+                      "flex items-start gap-2 rounded-sm border px-3 py-2 text-xs leading-relaxed",
+                      signUpFeedback.kind === "warning"
+                        ? "border-amber-300 bg-amber-50 text-amber-900"
+                        : "border-red-300 bg-red-50 text-red-800",
+                    )}
+                  >
+                    <svg
+                      class="mt-0.5 size-4 shrink-0"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-width="2"
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                      aria-hidden="true"
+                    >
+                      <path
+                        d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"
+                      />
+                      <path d="M12 9v4" />
+                      <path d="M12 17h.01" />
+                    </svg>
+                    <div class="flex flex-col gap-1">
+                      <span>{signUpFeedback.message}</span>
+                      {#if signUpFeedback.action === "signin"}
+                        <button
+                          type="button"
+                          class="self-start font-semibold underline underline-offset-2 hover:opacity-80"
+                          onclick={() => switchMode(false)}
+                        >
+                          Sign in instead
+                        </button>
+                      {/if}
+                    </div>
+                  </div>
+                {/if}
                 <button
-                  class="flex overflow-hidden justify-center items-center px-4 space-x-2 w-full h-10 text-sm font-light text-white rounded-sm transition focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 bg-neutral-700 ring-offset-background focus-visible:ring-zinc-300 hover:cursor-pointer"
-                  onclick={async () => {
-                    await authClient.signUp.email(
-                      {
-                        name,
-                        email,
-                        password,
-                      },
-                      {
-                        onSuccess: () => goto(page.data.redirectTo ?? "/"),
-                      },
-                    );
-                  }}
+                  type="submit"
+                  disabled={isBusy}
+                  class="flex overflow-hidden justify-center items-center px-4 space-x-2 w-full h-10 text-sm font-light text-white rounded-sm transition focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 bg-neutral-700 hover:bg-neutral-800 ring-offset-background focus-visible:ring-zinc-300 disabled:opacity-60 disabled:cursor-not-allowed"
                 >
-                  Sign Up
+                  {#if isSubmitting}
+                    <LoadingIndicator size="sm" />
+                    <span>Creating account...</span>
+                  {:else}
+                    <span>Sign Up</span>
+                  {/if}
                 </button>
-              </div>
+              </form>
 
               <!-- Toggle back to Sign In -->
               <div class="flex justify-center items-center mt-4 text-sm">
                 <span class="text-neutral-600">Already have an account?</span>
                 <button
                   type="button"
-                  class="ml-2 text-neutral-900 font-medium hover:underline"
-                  onclick={() => (isSignUp = false)}
+                  disabled={isBusy}
+                  class="ml-2 text-neutral-900 font-medium hover:underline disabled:opacity-50"
+                  onclick={() => switchMode(false)}
                 >
                   Sign in
                 </button>

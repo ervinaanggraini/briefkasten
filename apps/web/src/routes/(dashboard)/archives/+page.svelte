@@ -1,11 +1,12 @@
 <script lang="ts">
-import { onDestroy } from "svelte"
 import { watch } from "runed"
+import { onDestroy } from "svelte"
 import { InfiniteLoader, LoaderState } from "svelte-infinite"
 import { toast } from "svelte-sonner"
 import { page } from "$app/state"
 import { BookmarkRow } from "$lib/components/bookmark-row"
 import EmptyState from "$lib/components/EmptyState.svelte"
+import LoadingIndicator from "$lib/components/LoadingIndicator.svelte"
 import { Navbar } from "$lib/components/navbar"
 import { BookmarksService } from "$lib/state/bookmarks.svelte"
 import { useInterface } from "$lib/state/ui.svelte"
@@ -160,6 +161,12 @@ const clearSearch = () => {
         {#each bookmarksService.bookmarks as item (item.id)}
           <BookmarkRow bookmark={item} onDelete={(bookmarkId) => bookmarksService.remove(bookmarkId)} />
         {/each}
+        {#snippet loading()}
+          <div class="flex items-center gap-2 py-2 text-sm text-muted-foreground">
+            <LoadingIndicator size="sm" />
+            <span>Loading...</span>
+          </div>
+        {/snippet}
         {#snippet noData()}
           {#if bookmarksService.bookmarks.length >= 10}
             <div class="text-2xl">No more data</div>

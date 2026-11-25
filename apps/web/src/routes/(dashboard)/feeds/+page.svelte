@@ -8,6 +8,7 @@ import { page } from "$app/stores"
 import Blob from "$lib/assets/blob1.png"
 import EmptyState from "$lib/components/EmptyState.svelte"
 import { FeedRow } from "$lib/components/feed-row"
+import LoadingIndicator from "$lib/components/LoadingIndicator.svelte"
 import { Navbar } from "$lib/components/navbar"
 import { FeedEntriesService } from "$lib/state/feedEntries.svelte"
 import { useInterface } from "$lib/state/ui.svelte"
@@ -196,6 +197,12 @@ const clearSearch = () => {
           onUpdate={(updatedFeedEntry) => feedEntriesService.update(updatedFeedEntry)}
         />
       {/each}
+      {#snippet loading()}
+        <div class="flex items-center gap-2 py-2 text-sm text-muted-foreground">
+          <LoadingIndicator size="sm" />
+          <span>Loading...</span>
+        </div>
+      {/snippet}
       {#snippet noData()}
         {#if feedEntriesService.feedEntries.length >= 10}
           <div class="text-2xl">No more data</div>

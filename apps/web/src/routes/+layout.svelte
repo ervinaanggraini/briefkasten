@@ -3,6 +3,7 @@ import type { Snippet } from "svelte"
 import { Toaster } from "svelte-sonner"
 import Shortcuts from "$lib/components/GlobalShortcuts.svelte"
 import MediaQuery from "$lib/components/MediaQuery.svelte"
+import PageLoadingBar from "$lib/components/PageLoadingBar.svelte"
 import Scripts from "$lib/components/Scripts.svelte"
 import * as Tooltip from "$lib/components/ui/tooltip"
 import "$lib/styles/global.css"
@@ -16,6 +17,8 @@ const { children }: { children: Snippet } = $props()
 </svelte:head>
 
 <Scripts />
+
+<PageLoadingBar />
 
 <Shortcuts />
 
