@@ -1,148 +1,127 @@
-#!/usr/bin/env python3
-"""Compare Snyk Open Source and Snyk Code findings against a Git baseline."""
-
-from __future__ import annotations
-
 import json
-import os
+import re
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any
+from urllib.parse import unquote, urlsplit
 
 
-def _load_json(path: str) -> Any:
-    content = Path(path).read_text(encoding="utf-8").strip()
-    if not content:
-        return []
-    return json.loads(content)
+def load_report(filename):
+    return json.loads(Path(filename).read_text(encoding="utf-8"))
 
 
-def _normalize_project_path(raw_path: str, root_dir: str) -> str:
-    if not raw_path:
-        return ""
-    resolved_root = os.path.normpath(root_dir).replace("\\", "/").rstrip("/")
-    normalized = os.path.normpath(raw_path).replace("\\", "/")
-    if resolved_root and normalized.startswith(resolved_root + "/"):
-        return normalized[len(resolved_root) + 1 :]
-    if resolved_root and normalized == resolved_root:
-        return "."
-    return normalized.lstrip("./")
+def dependency_issues(filename, checkout):
+    report = load_report(filename)
+    projects = report if isinstance(report, list) else [report]
+    if not projects:
+        raise ValueError("Snyk Open Source reported no projects")
 
-
-def _extract_dependency_vulns(data: Any, root_dir: str) -> dict[tuple[str, str, str], dict[str, str]]:
-    projects = data if isinstance(data, list) else [data] if isinstance(data, dict) else []
-    findings: dict[tuple[str, str, str], dict[str, str]] = {}
-
+    issues = set()
     for project in projects:
-        if not isinstance(project, dict):
+        if not isinstance(project.get("vulnerabilities"), list) or project.get("error"):
+            raise ValueError("Snyk Open Source returned an incomplete project result")
+        target = project.get("targetFile") or project.get("displayTargetFile") or ""
+        if Path(target).is_absolute():
+            target = str(Path(target).relative_to(checkout))
+        identity = (project.get("projectName") or target, target)
+        for issue in project["vulnerabilities"]:
+            path = tuple(issue.get("from", [])[1:])
+            issues.add((*identity, issue["id"], issue.get("version", ""), path))
+    return issues
+
+
+def changed_lines(base):
+    entries = subprocess.check_output(
+        ["git", "diff", "--name-status", "-z", "--find-renames", "--diff-filter=AMRT", base, "HEAD", "--"]
+    )
+    fields = iter(entries.decode().rstrip("\0").split("\0")) if entries else iter(())
+    changed = {}
+    for status in fields:
+        path = next(fields)
+        files = [path]
+        if status.startswith("R"):
+            path = next(fields)
+            files.append(path)
+        if status == "R100":
             continue
-        raw_target = project.get("displayTargetFile") or project.get("targetFile") or project.get("path") or ""
-        target = _normalize_project_path(str(raw_target), root_dir)
-        vulns = project.get("vulnerabilities")
-        if not isinstance(vulns, list):
-            continue
-        for vuln in vulns:
-            if not isinstance(vuln, dict):
-                continue
-            vuln_id = str(vuln.get("id") or "")
-            pkg = str(vuln.get("packageName") or vuln.get("name") or "")
-            if not vuln_id:
-                continue
-            key = (target, vuln_id, pkg)
-            findings[key] = {
-                "target": target or "unknown",
-                "id": vuln_id,
-                "package": pkg or "unknown",
-                "severity": str(vuln.get("severity") or "unknown").upper(),
-                "title": str(vuln.get("title") or vuln_id),
-            }
-
-    return findings
-
-
-def check_dependencies(base_json_path: str, baseline_dir: str, current_json_path: str) -> int:
-    base_data = _load_json(base_json_path)
-    current_data = _load_json(current_json_path)
-
-    base_vulns = _extract_dependency_vulns(base_data, baseline_dir)
-    current_vulns = _extract_dependency_vulns(current_data, os.getcwd())
-
-    new_keys = sorted(set(current_vulns.keys()) - set(base_vulns.keys()))
-    if not new_keys:
-        print(f"No new Snyk dependency vulnerabilities introduced ({len(current_vulns)} baseline/total).")
-        return 0
-
-    for key in new_keys:
-        item = current_vulns[key]
-        print(
-            f"::error file={item['target']}::New Snyk dependency vulnerability "
-            f"[{item['severity']}] {item['id']} in {item['package']}: {item['title']}"
+        patch = subprocess.check_output(
+            ["git", "--literal-pathspecs", "diff", "--no-ext-diff", "--find-renames", "--unified=0",
+             base, "HEAD", "--", *files],
+            text=True,
+            errors="replace",
         )
-    return 1
+        ranges = []
+        for match in re.finditer(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@", patch, re.M):
+            start, count = int(match[1]), int(match[2] or "1")
+            # For deletions consider the surviving lines adjacent to the removed code.
+            end = start + 1 if count == 0 else start + count - 1
+            ranges.append((max(1, start), end))
+        changed[path] = ranges
+    return changed
 
 
-def _changed_files(base_sha: str) -> set[str]:
-    result = subprocess.run(
-        ["git", "diff", "--name-only", "--diff-filter=ACMRT", base_sha, "HEAD"],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    return {line.strip().replace("\\", "/") for line in result.stdout.splitlines() if line.strip()}
+def issue_locations(issue):
+    yield from issue.get("locations", ())
+    yield from issue.get("relatedLocations", ())
+    for flow in issue.get("codeFlows", ()):
+        for thread in flow.get("threadFlows", ()):
+            for step in thread.get("locations", ()):
+                yield step.get("location", {})
 
 
-def check_code(sarif_path: str, base_sha: str, changed: set[str] | None = None) -> int:
-    sarif = _load_json(sarif_path)
-    if not isinstance(sarif, dict):
-        return 0
-
-    touched_files = changed if changed is not None else _changed_files(base_sha)
-    if not touched_files:
-        print("No changed files to evaluate for Snyk Code SAST.")
-        return 0
-
-    matched: list[tuple[str, int, str, str]] = []
-    for run in sarif.get("runs", []):
-        if not isinstance(run, dict):
-            continue
-        for res in run.get("results", []):
-            if not isinstance(res, dict):
-                continue
-            rule_id = str(res.get("ruleId") or "snyk-code")
-            message = str((res.get("message") or {}).get("text") or rule_id)
-            for loc in res.get("locations", []):
-                phys = (loc or {}).get("physicalLocation") or {}
-                uri = str((phys.get("artifactLocation") or {}).get("uri") or "")
-                rel_path = uri.replace("\\", "/").lstrip("./")
-                if rel_path in touched_files:
-                    line = int((phys.get("region") or {}).get("startLine") or 1)
-                    matched.append((rel_path, line, rule_id, message))
-
-    if not matched:
-        print("No Snyk Code SAST issues found in changed files.")
-        return 0
-
-    for rel_path, line, rule_id, message in matched:
-        print(f"::error file={rel_path},line={line}::Snyk Code [{rule_id}]: {message}")
-    return 1
+def location_path(location, run):
+    artifact = location.get("artifactLocation", {})
+    if "uri" not in artifact and "index" in artifact:
+        artifact = run["artifacts"][artifact["index"]]["location"]
+    uri = urlsplit(artifact.get("uri", ""))
+    if uri.scheme not in ("", "file") or not uri.path:
+        return None
+    path = Path(unquote(uri.path))
+    if path.is_absolute():
+        return str(path.relative_to(Path.cwd())) if path.is_relative_to(Path.cwd()) else None
+    return str(path)
 
 
-def main(argv: list[str] | None = None) -> int:
-    args = argv if argv is not None else sys.argv[1:]
-    if len(args) == 4 and args[0] == "dependencies":
-        return check_dependencies(args[1], args[2], args[3])
-    if len(args) == 3 and args[0] == "code":
-        return check_code(args[1], args[2])
+def code_issues(filename, base):
+    report = load_report(filename)
+    runs = report.get("runs")
+    if not isinstance(runs, list) or not runs:
+        raise ValueError("Snyk Code did not return a SARIF scan")
+    changes = changed_lines(base)
+    matches = set()
+    for run in runs:
+        for issue in run.get("results", ()):
+            for item in issue_locations(issue):
+                location = item.get("physicalLocation", {})
+                path = location_path(location, run)
+                if path not in changes:
+                    continue
+                region = location.get("region", {})
+                start = region.get("startLine")
+                end = region.get("endLine", start)
+                if start is None or any(start <= high and end >= low for low, high in changes[path]):
+                    matches.add((issue["ruleId"], path, start or 0))
+                    break
+    return matches
 
-    print(
-        "Usage:\n"
-        "  check-snyk-changes.py dependencies <base.json> <baseline_dir> <current.json>\n"
-        "  check-snyk-changes.py code <report.sarif> <base_sha>",
-        file=sys.stderr,
-    )
-    return 2
+
+def main():
+    mode, *args = sys.argv[1:]
+    if mode == "dependencies":
+        baseline, baseline_dir, current = args
+        existing = dependency_issues(baseline, Path(baseline_dir).resolve())
+        issues = dependency_issues(current, Path.cwd()) - existing
+    elif mode == "code":
+        report, base = args
+        issues = code_issues(report, base)
+    else:
+        raise ValueError(f"Unknown scan type: {mode}")
+
+    print(f"Snyk {mode}: {len(issues)} finding(s) in the changes.")
+    for issue in sorted(issues):
+        print(json.dumps(issue))
+    return bool(issues)
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    sys.exit(main())
